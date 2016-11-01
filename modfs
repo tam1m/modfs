@@ -47,8 +47,8 @@ fsvarname="linux_fs_start"
 # hardware revision variable name
 hwrevname="HWRevision"
 # supported hardware revisions
-# 3370, 7362SL, 3390, 7490, 3490
-hwrevs_supported="175 185 193 203 212"
+# 3370, 7362SL, 3390, 7490, 3490, 7430
+hwrevs_supported="175 185 193 203 212 218"
 # AVM's binary to modify the NAND based partitions (busybox has it's own tools, but not ooB on a device with original firmware)
 update_kernel_binary="/sbin/update_kernel"
 # where is the wrapper mounted at the running system ?
@@ -80,15 +80,6 @@ ringbufferfile="/var/.srb_\$scriptname"
 # our custom modscript selection file name
 custom_selection_file="custom_modscripts"
 #
-# the correct FTP download path is model and version dependent
-# one path entry is required for every supported hardware revision (ftp_path_${hwrev})
-#
-ftp_server="download.avm.de"
-ftp_path_175="/fritz.box/fritzbox.wlan_3370/firmware/deutsch/fritz.box_wlan_3370.\$version.image"
-ftp_path_185="/fritz.box/fritzbox.7490/firmware/deutsch/FRITZ.Box_7490.\$version.image"
-ftp_path_193="/fritz.box/fritzbox.wlan_3390/firmware/deutsch/FRITZ.Box_3390.\$version.image"
-ftp_path_203="/fritz.box/fritzbox.7362_sl/firmware/deutsch/FRITZ.Box_7362_SL.\$version.image"
-ftp_path_212="/fritz.box/fritzbox.3490/firmware/deutsch/FRITZ.Box_3490.\$version.image"
 # some more values which have to be changed, if AVM modifies its firmware
 #
 # 128MB ext3 image plus 5 percent
@@ -131,7 +122,7 @@ nativefilesystems="tmpfs ext2 ext3 ext4 yaffs2"
 #  32 - different MD5 hashes for kernel MTDs
 #  33 - unable to find kernel MTD
 #  34 - unable to find alternative kernel MTD
-#  35 - missing linux_fs_start at environment
+#  35 - not used anymore, was missing linux_fs_start at environment
 #  36 - unsupported hardware revision
 #  37 - system modified already, restart needed
 #  38 - specified squashfs source file not found
@@ -155,12 +146,22 @@ nativefilesystems="tmpfs ext2 ext3 ext4 yaffs2"
 #  56 - error unmounting loopback device image
 #  57 - error removing loopback device image
 #  58 - not enough free space on any storage volume
+#  60 - wrong modscript detected, missing needed comment lines
+#  61 - wrong modscript detected, missing header at all
+#  62 - error extracting kernel image from firmware image file
 #  66 - the message file was not found after fallback to 'en'
 # 127 - internal error
+# 187 - unable to detect the current firmware version on the FTP server
+# 190 - no newer version found for "update" mode without local source file
+# 191 - error comparing version numbers (e.g. wrong format of them)
+# 200 - input image is missing or invalid
+# 202 - unspecified error mounting an ext2 image to extract data from it
+# 205 - a downloaded image file did not pass the integrity check (signature)
+# 222 - error detecting filesystem type of an image file
 #
 # our "internal" constants
 #
-modfs_version=0.3.5-040420161758
+modfs_version=0.4.0-251020161119
 modfs_comment="please look at https://github.com/PeterPawn/modfs for further info"
 bindirname="bin"
 localedirname="locale"
@@ -169,6 +170,9 @@ scriptdirname="modscripts"
 tmpdirbase="/var/tmp"
 packedpartition="128MB_ext3.gz"
 squashfsdirname="squashfs-root"
+scriptwrapper="wrap_script"
+modfsshelldebug="/var/tmp/modfs_debug_shell.log"
+scriptsdir="bin/scripts"
 showprogress=0
 msgtext_clearscreen="\x1B[2J\x1B[0;0H"
 msgtext_normal="\x1B[0m"
@@ -205,6 +209,10 @@ index_of_item()
 #
 bindir() { echo "$scriptpath/$bindirname/$(get_hardware_revision)"; }
 #
+# get scripts subdirectory name
+#
+scriptdir() { echo "$scriptpath/$scriptsdir"; }
+#
 # get locale subdirectory name
 #
 localedir() { echo "$scriptpath/$localedirname"; }
@@ -223,7 +231,7 @@ remove_temp_file()
 	[ ${#1} -lt 10 ] && return 127
 	$bb rm "$1" 2>/dev/null
 	rc=$?
-	$bb sed -e "\|^rm *$1\$|d" -i $tempfilelist
+	$bb sed -e "\|^rm *$1\$|d" -i $tempfilelist 2>/dev/null
 	debug "remove_temp_file: file=$1, rc=$rc"
 	return 0
 }
@@ -237,7 +245,7 @@ remove_directory()
 	[ ${#1} -lt 10 ] && return 127
 	$bb rm -r $dir 2>/dev/null
 	rc=$?
-	$bb sed -e "\|^rm -r *$dir\$|d" -i $tempfilelist
+	$bb sed -e "\|^rm -r *$dir\$|d" -i $tempfilelist 2>/dev/null
 	debug "remove_directory: directory=$1, rc=$rc"
 	return 0
 }
@@ -279,7 +287,13 @@ debug()
 #
 # get next system index from environment
 #
-get_system_switch() { $bb sed -n -e "s/^$fsvarname\t\([01]\)/\1/p" $envpathname; }
+get_system_switch() 
+{ 
+	local fsvar
+	fsvar=$($bb sed -n -e "s/^$fsvarname\t\([01]\)/\1/p" $envpathname)
+	[ -z "$fsvar" ] && fsvar="0"
+	echo $fsvar
+}
 #
 # get hardware revision from environment (it has not to be a number !)
 #
@@ -380,12 +394,12 @@ ask_yes_or_no()
 		nl="$answer\n"
 		[ ${#answer} -eq 0 ] && answer=$def && nl="\n"
 		debug "ask_yes_or_no: A=$answer"
-		if [ $answer == $(uppercase $yes) -o $answer == $yes ]; then
+		if [ "$answer" == $(uppercase $yes) -o $answer == $yes ]; then
 			echo -n 'Y'
 			echo -e -n "$nl" 1>&2
 			return 0
 		else
-			if [ $answer == $(uppercase $no) -o $answer == $no ]; then
+			if [ "$answer" == $(uppercase $no) -o $answer == $no ]; then
 				echo -n  'N'
 				echo -e -n "$nl" 1>&2
 				return 0
@@ -740,7 +754,7 @@ get_squashfs_endianess()
 	local endianess=0 endian sq_version
 	sq_version=$(get_squashfs_tools_version "$1")
 	debug "get_squashfs_endianess: using SquashFS version $sq_version"
-	endian=$(sq_unsquashfs -s "$1" 2>/dev/null | $bb sed -n -e "s/Found a valid \(big\|litte\) endian SQUASHFS.*/\1/p")
+	endian=$(sq_unsquashfs -s "$1" 2>/dev/null | $bb sed -n -e "s/Found a valid \(big\|little\) endian SQUASHFS.*/\1/p")
 	[ ${#endian} -gt 0 ] && [ x"$endian" == xlittle ] && endianess=1
 	debug "get_squashfs_endianess: $endian endian"
 	echo $endianess
@@ -837,6 +851,7 @@ get_target_system_version()
 	for var in version subversion date; do
 		eval "$($bb sed -n -e "s/^export FIRMWARE_$(uppercase $var)=\"\?\([^\"]*\)\"\?\$/$var=\"\1\"/p" "$rootdir/etc/version" | $bb sed -e "s/CONFIG_VERSION_MAJOR/version_major/")"
 	done
+	[ ${#subversion} -eq 0 ] && subversion="$($bb sed -n -e "/--project)/N;s|\n||p" "$rootdir/etc/version" | $bb sed -n -e "s|.*echo \(.*\)|\1|p")"
 	debug "get_target_system_version: version=\"$version\", subversion=\"$subversion\", date=\"$date\", rc=$rc"
 	echo "TARGET_SYSTEM_VERSION=\"$version\" TARGET_SYSTEM_SUBVERSION=\"$subversion\" TARGET_SYSTEM_DATE=\"$date\""
 }
@@ -900,7 +915,7 @@ execute_modscript()
 			opt=$(is_supported 'precheck' "$supports")
 			if [ $?	-eq 1 ]; then
 				# execute pre check
-				msg="$(eval export $MODSCRIPT_ENV;$shl $script $uselang $rootdir $mode precheck 2>&1)"
+				msg="$(eval export $MODSCRIPT_ENV;$shl $scriptwrapper $script $uselang $rootdir $mode precheck 2>&1)"
 				rc=$?
 				if [ $rc -gt 0 ]; then
 					progress 3 177 $rc
@@ -914,7 +929,7 @@ execute_modscript()
 			fi
 			if [ $rc -eq 0 ]; then
 				progress 1 178
-				msg="$(eval export $MODSCRIPT_ENV;$shl $script $uselang $rootdir $mode install 2>&1)"
+				msg="$(eval export $MODSCRIPT_ENV;$shl $scriptwrapper $script $uselang $rootdir $mode install 2>&1)"
 				rc=$?
 				if [ $rc -gt 0 ]; then
 					progress 3 177 $rc
@@ -926,7 +941,7 @@ execute_modscript()
 					opt=$(is_supported 'postcheck' "$supports")
 					if [ $?	-eq 1 ]; then
 						# execute post check
-						msg="$(eval export $MODSCRIPT_ENV;$shl $script $uselang $rootdir $mode postcheck 2>&1)"
+						msg="$(eval export $MODSCRIPT_ENV;$shl $scriptwrapper $script $uselang $rootdir $mode postcheck 2>&1)"
 						rc=$?
 						if [ $rc -gt 0 ]; then
 							progress 3 177 $rc
@@ -1357,33 +1372,76 @@ extract_filesystem()
 #
 get_system_version()
 {
-	local vf="$1$versionfilename" version subversion
-	subversion=$($shl "$1$versionfilename" --subversion)
-	version=$($shl "$1$versionfilename" --version)
-	[ ${#subversion} -gt 0 ] && echo "$version-$subversion" || echo "$version"
+	local rootdir="$1" version subversion date rc=0 var
+	version_major="$($bb sed -n -e "s/^export CONFIG_VERSION_MAJOR=\"\(.*\)\"\$/\1/p" "$rootdir/etc/init.d/rc.conf" | $bb sed -n -e "\$p")"
+	for var in version subversion date; do
+		eval "$($bb sed -n -e "s/^export FIRMWARE_$(uppercase $var)=\"\?\([^\"]*\)\"\?\$/$var=\"\1\"/p" "$rootdir/etc/version" | $bb sed -e "s/CONFIG_VERSION_MAJOR/version_major/")"
+	done
+	[ ${#subversion} -eq 0 ] && subversion="$($bb sed -n -e "/--project)/N;s|\n||p" "$rootdir/etc/version" | $bb sed -n -e "s|.*echo \(.*\)|-\1|p")"
+	debug "get_system_version: version=\"$version\", subversion=\"$subversion\", date=\"$date\", rc=$rc"
+	echo "${version}${subversion}"
 }
 #
 # download firmware file from manufacturer
 # $1 - target file name
+# $2 - source URL
 #
 download_firmware()
 {
-	local ftppath target="$1" version="$2" hwrev rc=0
-	debug "download_firmware: target=$target, version=$version"
-	hwrev="$(get_hardware_revision)"
-	eval ftppath="$(echo \$ftp_path_$hwrev)"
-	eval ftppath="$(echo $ftppath)"
-	debug "download_firmware: ftppath=$ftppath"
-	$bb ftpget $ftp_server "$target" "$ftppath" 2>/dev/null
+	local target="$1" source="$2" rc=0
+	debug "download_firmware: target=$target, source=$source"
+	$bb wget -q -O "$target" "$source" 2>/dev/null
 	rc=$?
 	if [ $rc -ne 0 ]; then
 		rc=42
 	else
 		if [ $($bb stat -c %s "$target") -eq 0 ]; then
 			rc=43
+		else
+			debug "download_firmware: $($bb stat -c %s "$target") bytes downloaded"
 		fi
 	fi
 	debug "download_firmware: exiting, rc=$rc"
+	return $rc
+}
+#
+# try to verify the signature of a downloaded image file
+# $1 - image file name
+#
+try_to_check_integrity()
+{
+	local target="$1" rc=205 opwd
+	debug "try_to_check_integrity: target=$target"
+	progress 1 206
+	if [ -f $(scriptdir)/check_image_signature ]; then
+		opwd="$($bb pwd)"
+		cd "$(scriptdir)"
+		$shl $scriptwrapper check_image_signature check
+		rc=$?
+		if [ $rc -eq 0 ]; then
+			$shl $scriptwrapper check_image_signature verify "$target"
+			rc=$?
+			if [ $rc -eq 0 ]; then
+				progress 3 96
+				debug "try_to_check_integrity: integrity check passed"
+				rc=0
+			else
+				progress 3 97
+				debug "try_to_check_integrity: integrity check failed, error code was $rc"
+				rc=205
+			fi
+		else
+			progress 3 95
+			debug "try_to_check_integrity: some components are missing (rc=$rc), unable to verify signature"
+			rc=0
+		fi
+		cd "$opwd"
+	else
+		progress 3 95
+		debug "try_to_check_integrity: script is not present"
+		rc=0
+	fi
+	debug "try_to_check_integrity: exiting, rc=$rc"
 	return $rc
 }
 #
@@ -1691,7 +1749,7 @@ get_path_selection()
 		echo -ne "\n$(get_localized $lang $msg4) " 1>&2
 		while read -n 10 -s -t 1; do :; done
 		read -n 1 -s selection
-		case $selection in
+		case "$selection" in
 			[qQ])
 				echo -e "$selection$(get_localized $lang $msg7)" 1>&2
 				return 1
@@ -1875,6 +1933,13 @@ check_firmware_image()
 {
 	local firmwareimage="$1" rc=0
 	debug "check_firmware_image: src=$firmwareimage"
+	if [ $no_sigcheck -ne 1 ]; then
+		try_to_check_integrity "$firmwareimage"
+		rc=$?
+		if [ $rc -ne 0 ]; then
+			return $rc
+		fi
+	fi
 	progress 1 167 "$firmwareimage"
 	$bb tar -tf "$firmwareimage" "$firmware_filesystem_image" 2>/dev/null 1>&2
 	rc=$?
@@ -1935,7 +2000,7 @@ check_squashfs_file_version()
 	sq_unsquashfs -dest "$checkdir/test" "$squashfsimage" "$versionfilename" 2>/dev/null 1>&2
 	if [ -f "$checkdir/test$versionfilename" ]; then
 		# check image version
-		imageversion="$($checkdir/test$versionfilename -v)"
+		imageversion="$(get_system_version "$checkdir/test")"
 		if [ x$imageversion == x$(get_system_version) ]; then
 			progress 3 96
 			rc=0
@@ -2041,7 +2106,7 @@ get_input_image_path()
 						echo -ne "\n$(get_localized $lang 161) " 1>&2
 						while read -n 10 -s -t 1; do :; done
 						read -n 1 -s selection
-						case $selection in
+						case "$selection" in
 							[qQ])
 								echo -e "$selection$(get_localized $lang 131)" 1>&2
 								return 1
@@ -2062,7 +2127,7 @@ get_input_image_path()
 								fi
 								;;
 						esac
-						if [ x$selection == xp ]; then
+						if [ x"$selection" == x"p" ]; then
 							echo -ne "$selection\n$msgtext_normal" 1>&2
 						else
 							echo -ne "$selection\n\n$msgtext_normal" 1>&2
@@ -2348,7 +2413,7 @@ get_source()
 		while read -n 10 -s -t 1; do :; done
 		read -n 1 -s selection
 		if [ $noversioncheck -eq 0 ]; then
-			case $selection in
+			case "$selection" in
 				[aA])
 					source=running
 					;;
@@ -2368,7 +2433,7 @@ get_source()
 			esac
 			break
 		else
-			case $selection in
+			case "$selection" in
 				[aA])
 					source=download_update
 					;;
@@ -2407,62 +2472,95 @@ get_working_directory()
 #
 # compare firmware versions
 #
-is_newer_version()
+# 0   - left is newer
+# 1   - left is equal
+# 2   - left is older
+# 4   - different models
+# 128 - invalid left or right version
+#
+compare_versions()
 {
-	local left="$1" right left_model left_major left_minor right_model right_major right_minor
-	right="$(get_system_version)"
-	eval "$(echo $left | $bb sed -n -e 's/\([0-9]\{1,3\}\)\.\([0-9]\{2\}\)\.\([0-9]\{2\}\)/left_model=\1 left_major=\2 left_minor=\3/p')"
-	eval "$(echo $right | $bb sed -n -e 's/\([0-9]\{1,3\}\)\.\([0-9]\{2\}\)\.\([0-9]\{2\}\)/right_model=\1 right_major=\2 right_minor=\3/p')"
-	debug "is_newer_version: left=$left, right=$right"
-	[ ${#left_model} -eq 0 -o ${#left_major} -eq 0 -o ${#left_minor} -eq 0 -o ${#right_model} -eq 0 -o ${#right_major} -eq 0 -o ${#right_minor} -eq 0 ] && return 2
-	[ $left_model -ne $right_model ] && return 3
-	[ $left_major -gt $right_major ] && return 0
+	local left="$1" right="$2" left_model left_major left_minor right_model right_major right_minor
+	eval "$(echo $left | $bb sed -n -e 's/\([0-9]\{1,3\}\)\.\([0-9]\{2\}\)\.\([0-9]\{2\}\)\(-[0-9]*\)\?/left_model=\1 left_major=\2 left_minor=\3 left_sub=\4/p')"
+	eval "$(echo $right | $bb sed -n -e 's/\([0-9]\{1,3\}\)\.\([0-9]\{2\}\)\.\([0-9]\{2\}\)\(-[0-9]*\)\?/right_model=\1 right_major=\2 right_minor=\3 right_sub=\4/p')"
+	debug "compare_version: left=$left, right=$right"
+	[ ${#left_model} -eq 0 -o ${#left_major} -eq 0 -o ${#left_minor} -eq 0 -o ${#right_model} -eq 0 -o ${#right_major} -eq 0 -o ${#right_minor} -eq 0 ] && return 128 # wrong input data
+	[ $left_model -ne $right_model ] && return 4 # different version
+	[ $left_major -gt $right_major ] && return 0 # newer
 	if [ $left_major -eq $right_major ]; then
-		[ $left_minor -gt $right_minor ] && return 0
+		[ $left_minor -gt $right_minor ] && return 0 # newer
+		if [ $left_minor -eq $right_minor ]; then
+			if [ ${#left_sub} -gt 0 -a ${#right_sub} -gt 0 ]; then
+				left_sub="${left_sub:1}"
+				right_sub="${right_sub:1}"
+				left_sub=$(( "${left_sub//[^0-9]}" )) # remove any suffix like "M"
+				right_sub=$(( "${right_sub//[^0-9]}" ))
+				[ $left_sub -gt $right_sub ] && return 0 # newer
+				[ $left_sub -eq $right_sub ] && return 1
+				return 2
+			else
+				return 1
+			fi
+		else
+			return 2
+		fi
 	fi
 	return 1
 }
 #
-# retrieve latest version number from FTP server
+# retrieve newer or current version number and URL from manufacturer
 #
-get_latest_version_from_ftp()
+get_version_from_manufacturer()
 {
-	local ftppath target="$1" hwrev rc=0 version filename versions
-	debug "get_latest_version_from_ftp: target=$target"
-	progress 1 188
-	hwrev="$(get_hardware_revision)"
-	eval ftppath="$(echo \$ftp_path_$hwrev)"
-	version="|"
-	eval ftppath="$(echo $ftppath)"
-	filename="${ftppath##*/}"
-	filename_prefix="${filename%|*}"
-	filename_suffix="${filename##*|}"
-	filename_prefix="$(escape_regexp "${filename_prefix}")"
-	filename_suffix="$(escape_regexp "${filename_suffix}")"
-	ftppath="${ftppath%/*}"
-	version="$($bb wget -O - "http://$ftp_server$ftppath/" 2>/dev/null | $bb sed -n -e "s#.*${filename_prefix}\([0-9]\{2,3\}\.[0-9]\{2\}\.[0-9]\{2\}\)${filename_suffix}.*#\1#p" | $bb uniq | $bb sort -nr | $bb sed -n -e '1p')"
-	if [ ${#version} -eq 0 ]; then
+	local target="${1:-newer}" rc=0 msg nf err res opt NewVersion DownloadURL curr comp
+	debug "get_version_from_manufacturer: target=$target"
+	[ $target == current ] && opt="-c"
+	curr="$(get_system_version)"
+	[ $target == current ] && progress 1 207 "$curr" || progress 1 188
+	res="$($shl $scriptwrapper $(scriptdir)/check_update $opt)"
+	rc=$?
+	if [ $rc -ne 0 ]; then
 		progress 3 97
-		progress 2 187
-		rc=187
-	else
-		progress 3 96
-		is_newer_version "$version"
-		rc=$?
-		if [ $rc -eq 0 ]; then
-			progress 3 189 $version
-			echo "$version"
-		else
-			if [ $rc -eq 1 ]; then
-				progress 3 190 "$(get_system_version)"
-				rc=190
+		debug "get_version_from_manufacturer: error $rc returned from check_update"
+		if [ $rc -eq 1 ]; then
+			if [ $target == current ]; then
+				echo "$(get_localized $lang 208 $curr)" 1>&2
+				rc=208
 			else
-				progress 3 191 $rc "${version}" "$(get_system_version)"
-				rc=191
+				echo "$(get_localized $lang 190 $curr)" 1>&2
+				rc=190
 			fi
+		else
+			if [ $target == current ]; then
+				echo "$(get_localized $lang 209 $curr)" 1>&2
+				rc=209
+			else
+				echo "$(get_localized $lang 187)" 1>&2
+				rc=187
+			fi
+		fi		
+	else
+		eval "$res"
+		if [ $target == current ]; then 
+			debug "get_version_from_manufacturer: found current version $NewVersion, URL=$DownloadURL"
+			compare_versions "$NewVersion" "$(get_system_version)"
+			comp=$?
+			if [ $comp -eq 1 ]; then
+				progress 3 96
+				rc=0
+			else
+				progress 3 97
+				echo "$(get_localized $lang 208 $curr)" 1>&2
+				rc=208
+			fi
+		else
+			progress 3 96
+			echo "$(get_localized $lang 189 "$NewVersion")" 1>&2
+			debug "get_version_from_manufacturer: found new version $NewVersion, URL=$DownloadURL"
 		fi
 	fi
-	debug "get_latest_version_from_ftp: exiting, rc=$rc"
+	debug "get_version_from_manufacturer: exiting, rc=$rc"
+	[ $rc -eq 0 ] && echo "$res"
 	return $rc
 }
 #
@@ -2471,7 +2569,7 @@ get_latest_version_from_ftp()
 cleanup()
 {
 	debug "cleanup: running cleanup from file $tempfilelist"
-	[ $MODFS_DEBUG -eq 1 ] && ($bb cat $tempfilelist | $debugoutput)
+	[ $MODFS_DEBUG -eq 1 ] && ($bb cat $tempfilelist 2>/dev/null | $debugoutput)
 	. $tempfilelist 2>/dev/null
 	$bb rm $tempfilelist 2>/dev/null
 }
@@ -2547,6 +2645,25 @@ scriptname="${scriptfile##*/}"
 # switch to our own version of Busybox
 bb="$(bindir)/busybox"
 shl="$bb sh"
+if [ x"$MODFS_RUN_SHELL" != x"1" ]; then
+	mkdir -p /var/run/modfs
+	ln -s $bb /var/run/modfs/sh
+	oldpath="$PATH"
+	export PATH=$(bindir)
+	export MODFS_RUN_SHELL=1
+	export SHELL=/var/run/modfs/sh
+	echo "respawn script with custom BusyBox shell, SHLVL=$SHLVL" 1>&2
+	if [ x"$MODFS_DEBUG_SHELL" == x"1" ]; then
+		[ -f "$modfsshelldebug" ] && rm "$modfsshelldebug" 2>/dev/null
+		export MODFS_DEBUG_SHELL_FILE="$modfsshelldebug"
+	fi
+	echo "$shl $0 $*" 1>&2
+	$shl $0 $*
+	rc=$?
+	export PATH="$oldpath"
+	rm -r /var/run/modfs 2>/dev/null
+	exit $rc
+fi
 #
 # check debug settings and initialize ring buffer, if necessary
 #
@@ -2588,13 +2705,17 @@ loopback_used=0
 squashfs_blocksize=0
 squashfs_endianess=0
 rc=0
+debug "modfs: PATH=$PATH"
+debug "modfs: SHELL=$SHELL"
+debug "modfs: SHLVL=$SHLVL"
+debug "modfs: BusyBox: $(busybox | sed -n -e '1p')"
 #
 # we'll store an unlink command for all temporary directories and files here and remove it, if the target is deleted elsewhere
 #
 tempfilelist="$tmpfsbasedir/$$_filelist_$($bb date +%s)"
 $bb touch $tempfilelist
 debug "modfs: using temporary file list from $tempfilelist"
-trap 'cleanup' EXIT HUP
+trap 'cleanup' EXIT HUP INT
 debug "modfs: cleanup trap set"
 #
 # check for 'undo' request, which is the only argument, what we expect
@@ -2632,6 +2753,7 @@ else
 	install_image_only=0
 	install_no_wrapper=0
 	install_no_kernel=0
+	no_sigcheck=0
 	case $1 in
 		update)
 			noversioncheck=1
@@ -2673,6 +2795,11 @@ else
 	[ $update_file_provided -eq 1 ] && debug "modfs: firmware_update_file=$firmware_update_file"
 	[ $create_image_only -eq 1 ] && debug "modfs: create_image_only=1, target_image_name=$target_image_name"
 	[ $install_image_only -eq 1 ] && debug "modfs: install_image_only=1, firmware_update_file=$firmware_update_file, install_no_kernel=$install_no_kernel, install_no_wrapper=$install_no_wrapper"
+	if [ x"$NOVERIFY" == x"1" ]; then
+		no_sigcheck=1
+		debug "modfs: no_sigcheck=1 requested"
+	fi
+	scriptwrapper="$(scriptdir)/$scriptwrapper"
 fi
 #
 # check prerequisites first, any further action depends on them
@@ -2688,9 +2815,7 @@ if [ $prerc -eq 32 ]; then
 			echo -e "$(get_localized $lang $rc)" 1>&2
 		else
 			echo -e "$(get_localized $lang 183)" 1>&2
-			[ $MODFS_DEBUG -ne 1 ] && reboot
-			echo -e "Ready to reboot, but due to active debugging output exiting instead.\nCheck debug output and reboot manually." 1>&2
-			exit 183
+			prerc=0
 		fi
 	fi
 fi
@@ -2742,79 +2867,92 @@ case $source in
 			exit $rc
 		fi
 		debug "modfs: working directory=$working_directory"
+		version="$(get_system_version)"
 		progress 1 121 "$version"
 		download_directory="$working_directory/$($bb date +%s)"
 		$bb mkdir -p "$download_directory"
 		echo "$bb rm -r $download_directory" >>$tempfilelist
 		debug "modfs: download directory=$download_directory"
-		download_firmware "$download_directory/$firmwarestoragename" "$(get_system_version)"
+		download_version="$(get_version_from_manufacturer current)"
 		rc=$?
-		if [ $rc -ne 0 ]; then
-			if [ $rc -eq 42 ]; then
-				progress 3 97
-				echo "$(get_localized $lang 42)" 1>&2
-			else
-				if [ $rc -eq 43 ]; then
+		if [ $rc -eq 0 ]; then
+			eval "$download_version"
+			download_firmware "$download_directory/$firmwarestoragename" "$DownloadURL"
+			rc=$?
+			if [ $rc -ne 0 ]; then
+				if [ $rc -eq 42 ]; then
 					progress 3 97
-					echo "$(get_localized $lang 43)" 1>&2
+					echo "$(get_localized $lang 42)" 1>&2
+				else
+					if [ $rc -eq 43 ]; then
+						progress 3 97
+						echo "$(get_localized $lang 43)" 1>&2
+					fi
 				fi
-			fi
-			exit $rc
-		else
-			progress 3 96
-			working_directory="$(get_working_directory $extract_space_needed "tmpfs nand storage")"
-			rc=$?
-			if [ $rc -ne 0 ]; then
-				echo -e "$(get_localized $lang $rc)" 1>&2
-				exit $rc
-			fi
-			image_directory="$working_directory/$($bb date +%s)"
-			$bb mkdir -p "$image_directory"
-			echo "$bb rm -r $image_directory" >>$tempfilelist
-			progress 1 132
-			extract_rootfs_from_firmware "$download_directory/$firmwarestoragename" "$image_directory/$rootfsname"
-			rc=$?
-			if [ $rc -ne 0 ]; then
-				progress 3 97
-				echo -e "$(get_localized $lang $rc)" 1>&2
 				exit $rc
 			else
 				progress 3 96
-				baseimage="$image_directory/$rootfsname"
-				progress 1 133
-				remove_directory "$download_directory"
-				progress 3 96
-				copybase=$(ask_yes_or_no n "$(get_localized $lang 193)")
-				if [ $copybase == Y ]; then
-					target=""
-					if [ $(is_tmpfs $image_directory) -eq 1 ]; then
-						targetdir="$(get_persistent_path $(( $($bb stat -c %s "$baseimage") + 4096 )) )"
-						rc=$?
-						if [ $rc -eq 0 ]; then
-							target=$targetdir/$rootfsname
-						fi
-					else
-						target="$working_directory/$rootfsname"
-					fi
-					progress 1 134
-					[ $rc -eq 0 ] && $bb mv "$image_directory/$rootfsname" "$target"
+				if [ $no_sigcheck -ne 1 ]; then
+					try_to_check_integrity "$download_directory/$firmwarestoragename"
 					rc=$?
 					if [ $rc -ne 0 ]; then
-						progress 3 97
-						if [ ${#target} -gt 0 ]; then
-							echo -e "$(get_localized $lang 53)" 1>&2
-							exit 53
-						fi
-					else
-						progress 3 96
-						echo -e "$(get_localized $lang 135 "$target")" 1>&2
-						baseimage="$target"
-						remove_directory "$image_directory"
+						exit $rc
 					fi
 				fi
+				working_directory="$(get_working_directory $extract_space_needed "tmpfs nand storage")"
+				rc=$?
+				if [ $rc -ne 0 ]; then
+					echo -e "$(get_localized $lang $rc)" 1>&2
+					exit $rc
+				fi
+				image_directory="$working_directory/$($bb date +%s)"
+				$bb mkdir -p "$image_directory"
+				echo "$bb rm -r $image_directory" >>$tempfilelist
+				progress 1 132
+				extract_rootfs_from_firmware "$download_directory/$firmwarestoragename" "$image_directory/$rootfsname"
+				rc=$?
+				if [ $rc -ne 0 ]; then
+					progress 3 97
+					echo -e "$(get_localized $lang $rc)" 1>&2
+					exit $rc
+				else
+					progress 3 96
+					baseimage="$image_directory/$rootfsname"
+					progress 1 133
+					remove_directory "$download_directory"
+					progress 3 96
+					copybase=$(ask_yes_or_no n "$(get_localized $lang 193)")
+					if [ $copybase == Y ]; then
+						target=""
+						if [ $(is_tmpfs $image_directory) -eq 1 ]; then
+							targetdir="$(get_persistent_path $(( $($bb stat -c %s "$baseimage") + 4096 )) )"
+							rc=$?
+							if [ $rc -eq 0 ]; then
+								target=$targetdir/$rootfsname
+							fi
+						else
+							target="$working_directory/$rootfsname"
+						fi
+						progress 1 134
+						[ $rc -eq 0 ] && $bb mv "$image_directory/$rootfsname" "$target"
+						rc=$?
+						if [ $rc -ne 0 ]; then
+							progress 3 97
+							if [ ${#target} -gt 0 ]; then
+								echo -e "$(get_localized $lang 53)" 1>&2
+								exit 53
+							fi
+						else
+							progress 3 96
+							echo -e "$(get_localized $lang 135 "$target")" 1>&2
+							baseimage="$target"
+							remove_directory "$image_directory"
+						fi
+					fi
+				fi
+				debug "modfs: baseimage=$baseimage"
+				debug "modfs: download done"
 			fi
-			debug "modfs: baseimage=$baseimage"
-			debug "modfs: download done"
 		fi
 		;;
 	file)
@@ -2830,9 +2968,10 @@ case $source in
 		debug "modfs: file selection done"
 		;;
 	download_update)
-		version="$(get_latest_version_from_ftp)"
+		download_version="$(get_version_from_manufacturer)"
 		rc=$?
 		if [ $rc -eq 0 ]; then
+			eval "$download_version"
 			working_directory="$(get_working_directory $download_space_needed "tmpfs nand storage")"
 			rc=$?
 			if [ $rc -ne 0 ]; then
@@ -2841,12 +2980,12 @@ case $source in
 				exit $rc
 			fi
 			debug "modfs: working directory=$working_directory"
-			progress 1 121 "$version"
+			progress 1 121 "$NewVersion"
 			download_directory="$working_directory/$($bb date +%s)"
 			$bb mkdir -p "$download_directory"
 			echo "$bb rm -r $download_directory" >>$tempfilelist
 			debug "modfs: download directory=$download_directory"
-			download_firmware "$download_directory/$firmwarestoragename" "$version"
+			download_firmware "$download_directory/$firmwarestoragename" "$DownloadURL"
 			rc=$?
 			if [ $rc -ne 0 ]; then
 				if [ $rc -eq 42 ]; then
@@ -2861,6 +3000,13 @@ case $source in
 				exit $rc
 			else
 				progress 3 96
+				if [ $no_sigcheck -ne 1 ]; then
+					try_to_check_integrity "$download_directory/$firmwarestoragename"
+					rc=$?
+					if [ $rc -ne 0 ]; then
+						exit $rc
+					fi
+				fi
 				working_directory="$(get_working_directory $fullimage_space_needed "tmpfs nand storage")"
 				rc=$?
 				if [ $rc -ne 0 ]; then
@@ -2948,6 +3094,13 @@ case $source in
 			$bb mkdir -p "$image_directory"
 			echo "$bb rm -r $image_directory" >>$tempfilelist
 			debug "modfs: image directory=$image_directory"
+			if [ $no_sigcheck -ne 1 ]; then
+				try_to_check_integrity "$firmware_update_file"
+				rc=$?
+				if [ $rc -ne 0 ]; then
+					exit $rc
+				fi
+			fi
 			progress 1 195
 			extract_kernel "$firmware_update_file" "$image_directory/$kernelfilename"
 			rc=$?
@@ -3106,7 +3259,7 @@ if [ $rc -eq 0 -a $install_image_only -eq 0 ]; then
 		echo -ne "$(get_localized $lang 150 $unpack_directory/$squashfsdirname)" 1>&2
 		while [ 1 -eq 1 ]; do
 			read abort
-			if [ x$abort == xq ]; then
+			if [ x"$abort" == x"q" ]; then
 				echo -e "$(get_localized $lang 155)" 1>&2
 				rc=1
 				break

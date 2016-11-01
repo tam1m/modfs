@@ -1,0 +1,7 @@
+busybox binary
+openssl binary
+mke2fs binary
+e2fsck binary
+mksquash* binary
+unsquash* binary
+
